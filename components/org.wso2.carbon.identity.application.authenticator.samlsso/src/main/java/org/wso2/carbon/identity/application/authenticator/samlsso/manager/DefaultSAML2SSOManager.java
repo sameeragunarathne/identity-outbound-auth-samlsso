@@ -19,6 +19,7 @@
 package org.wso2.carbon.identity.application.authenticator.samlsso.manager;
 
 import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -93,6 +94,7 @@ import org.wso2.carbon.identity.application.authenticator.samlsso.internal.SAMLS
 import org.wso2.carbon.identity.application.authenticator.samlsso.internal.SAMLSSOAuthenticatorServiceDataHolder;
 import org.wso2.carbon.identity.application.authenticator.samlsso.util.SSOConstants;
 import org.wso2.carbon.identity.application.authenticator.samlsso.util.SSOUtils;
+import org.wso2.carbon.identity.application.common.model.CertificateInfo;
 import org.wso2.carbon.identity.application.common.model.ClaimMapping;
 import org.wso2.carbon.identity.application.common.model.IdentityProvider;
 import org.wso2.carbon.identity.application.common.util.IdentityApplicationConstants;
@@ -137,6 +139,8 @@ public class DefaultSAML2SSOManager implements SAML2SSOManager {
     private static String DEFAULT_MULTI_ATTRIBUTE_SEPARATOR = ",";
     private static String MULTI_ATTRIBUTE_SEPARATOR = "MultiAttributeSeparator";
     private static final String VERIFY_ASSERTION_ISSUER = "VerifyAssertionIssuer";
+    private static final String BEGIN_CERTIFICATE = "-----BEGIN CERTIFICATE-----";
+    private static final String END_CERTIFICATE = "-----END CERTIFICATE-----";
     private IdentityProvider identityProvider = null;
     private Map<String, String> properties;
     private String tenantDomain;
@@ -1034,6 +1038,9 @@ public class DefaultSAML2SSOManager implements SAML2SSOManager {
      */
     private void validateSignature(XMLObject signature) throws SAMLSSOException {
         SignatureImpl signImpl = (SignatureImpl) signature;
+        CertificateInfo[] certificateInfos;
+        boolean isExceptionThrown = false;
+        ValidationException validationException = null;
         try {
             SAMLSignatureProfileValidator signatureProfileValidator = new SAMLSignatureProfileValidator();
             signatureProfileValidator.validate(signImpl);
@@ -1044,16 +1051,42 @@ public class DefaultSAML2SSOManager implements SAML2SSOManager {
             throw new SAMLSSOException(logMsg, ex);
         }
 
-        if (identityProvider.getCertificate() == null || identityProvider.getCertificate().isEmpty()) {
+        if (ArrayUtils.isEmpty(identityProvider.getCertificateInfoArray())) {
             throw new SAMLSSOException("Signature validation is enabled, but IdP doesn't have a certificate");
         }
 
-        try {
-            X509Credential credential = new X509CredentialImpl(tenantDomain, identityProvider.getCertificate());
+        certificateInfos = identityProvider.getCertificateInfoArray();
+        for (CertificateInfo certificateInfo : certificateInfos) {
+            if (log.isDebugEnabled()) {
+                log.debug("More than one certificate has been found.");
+            }
+            String certVal = certificateInfo.getCertValue();
+            if (certVal.contains(BEGIN_CERTIFICATE)) {
+                // Remove begin and end statement from the plain text certificate. The reason is with begin and end
+                // statement, some certificates can't
+                // be handle by X509CredentialImpl due to some issues in java 1.6.
+                certVal = certVal.replace(BEGIN_CERTIFICATE, "").replace(END_CERTIFICATE, "").
+                        replace("\n", "");
+                if (log.isDebugEnabled()) {
+                    log.debug("Begin and end statement has been removed from the plain text certificate.");
+                }
+            }
+            X509Credential credential = new X509CredentialImpl(tenantDomain, certVal);
             SignatureValidator validator = new SignatureValidator(credential);
-            validator.validate(signImpl);
-        } catch (ValidationException e) {
-            throw new SAMLSSOException("Signature validation failed for SAML Response", e);
+            try {
+                if (log.isDebugEnabled()) {
+                    log.debug("Validating the SAML signature with second certificate");
+                }
+                validator.validate(signImpl);
+                isExceptionThrown = false;
+                break;
+            } catch (ValidationException e) {
+                isExceptionThrown = true;
+                validationException = e;
+            }
+        }
+        if (isExceptionThrown) {
+            throw new SAMLSSOException("Signature validation failed for SAML Response", validationException);
         }
     }
 
